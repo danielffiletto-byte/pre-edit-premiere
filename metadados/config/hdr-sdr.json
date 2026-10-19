@@ -1,0 +1,8 @@
+{
+  "preset": "spline-teste3-aprovado-v1",
+  "enabled": true,
+  "filter": "libplacebo=colorspace=bt709:color_primaries=bt709:color_trc=bt709:range=tv:tonemapping=spline:gamut_mode=perceptual:contrast_recovery=0.3:peak_detect=true:apply_dolbyvision=true:format=yuv420p10le",
+  "gpu_encoder": ["-c:v", "hevc_nvenc", "-preset", "p7", "-tune", "hq", "-rc", "vbr", "-cq", "16", "-b:v", "0", "-multipass", "fullres", "-profile:v", "main10"],
+  "cpu_encoder": ["-c:v", "libx265", "-preset", "fast", "-crf", "16", "-pix_fmt", "yuv420p10le", "-x265-params", "pools=4:frame-threads=2:log-level=error"],
+  "approved": "2026-10-18; teste 3 e MP4 Andrea aprovados por Daniel. SDR Rec.709; sem filtro 4K ou Lumetri incorporado."
+}

@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "gemini": {
+    "model": "gemini-flash-lite-latest",
+    "fallback_model": "gemini-flash-latest",
+    "max_attempts": 3
+  },
+  "cor": {
+    "override_rec709": false,
+    "preset_hdr_sdr": "config/hdr-sdr.json"
+  },
+  "audio": {
+    "noise_reduction_db": 3.0,
+    "sample_rate": 48000,
+    "pcm_depth": 24,
+    "peak_target_dbfs": 0.0,
+    "max_gain_db": 6.0
+  },
+  "titulos": {
+    "animar_fade": true,
+    "posicao": "fixa_do_modelo"
+  },
+  "modelo": "prproj/modelo-base.prproj",
+  "editor": "premiere"
+}

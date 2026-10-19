@@ -1,0 +1,7 @@
+{
+  "model": "medium",
+  "language": "pt",
+  "device": "cpu",
+  "compute_type": "int8",
+  "beam_size": 5
+}
