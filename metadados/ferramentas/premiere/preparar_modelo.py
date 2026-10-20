@@ -49,9 +49,9 @@ def prepare():
     print('Modelo-base independente preservado.')
 
 
-def relocate_references(previous_folder):
+def relocate_references(previous_folder, target_folder=None):
     """Atualiza caminhos dos modelos após reorganização, sem alterar componentes."""
-    folder = (CENTRAL/'prproj').resolve()
+    folder = Path(target_folder or CENTRAL/'prproj').resolve()
     previous_folder = previous_folder.resolve()
     changes = 0
     for path in folder.glob('*.prproj'):

@@ -17,6 +17,7 @@ import xml.etree.ElementTree as ET
 
 from exportar_premiere import ROOT, DEFAULT_CLIENTS, discover, file_hash, report
 from console_pipeline import LiveProgress, say, summary
+from ambiente_online import model_cache
 
 CONFIG = {'schema': 2, 'max_words': 5, 'line_chars': 32, 'max_lines': 2,
           'max_seconds': 2.5, 'gap_seconds': 0.35, 'min_seconds': 0.4}
@@ -65,7 +66,7 @@ def transcribe(source, options):
             from faster_whisper import WhisperModel
             _MODELS[key] = WhisperModel(options['model'], device=options['device'],
                                        compute_type=options['compute_type'],
-                                       download_root=str(ROOT.parent / 'transcricao' / '.modelos'),
+                                       download_root=str(model_cache(ROOT.parent / 'transcricao' / '.modelos')),
                                        local_files_only=True)
     segments = []
     with LiveProgress('Transcrevendo áudio localmente', inline=True) as progress:

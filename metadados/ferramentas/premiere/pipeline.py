@@ -28,6 +28,7 @@ from fila_edicoes import choose_jobs, SelectionCancelled
 from controle_execucao import control, pending_files
 from converter_hdr import prepare as prepare_hdr
 from exportar_premiere import ffmpeg_run
+from ambiente_online import logs_folder, model_path as configured_model, work_edition
 
 VERSION = 1
 
@@ -64,11 +65,11 @@ def preflight():
     hdr = json.loads((CENTRAL/config['cor']['preset_hdr_sdr']).read_text(encoding='utf-8'))
     if not hdr.get('filter') or not hdr.get('preset'):
         raise RuntimeError('Preset HDR→SDR ausente ou inválido.')
-    if not (CENTRAL/config['modelo']).is_file():
+    if not configured_model(CENTRAL, config).is_file():
         raise RuntimeError('Modelo nativo central ausente.')
     from gerar_prproj import read_project
     from titulos_nativos import inspect_templates
-    native = read_project(CENTRAL/config['modelo'])
+    native = read_project(configured_model(CENTRAL, config))
     inspect_templates(native)
     if len(native.findall('AudioClipTrack')) != 2:
         raise RuntimeError('Modelo deve conter exatamente as duas faixas de áudio estudadas.')
@@ -79,6 +80,8 @@ def preflight():
 
 def process(edition, videos, config, force=False):
     started = time.monotonic()
+    if os.environ.get('PREEDITOR_WORKSPACE_ROOT'):
+        edition.mkdir(parents=True, exist_ok=True)
     metadata, output_dir = edition/'metadados', edition/('CapCut' if config.get('editor') == 'capcut' else 'premiere')
     metadata.mkdir(exist_ok=True)
     output_dir.mkdir(exist_ok=True)
@@ -97,7 +100,7 @@ def process(edition, videos, config, force=False):
 
 def _process(edition, videos, config, started, force=False):
     metadata, output_dir = edition/'metadados', edition/('CapCut' if config.get('editor') == 'capcut' else 'premiere')
-    model_path = CENTRAL/config['modelo']
+    model_path = configured_model(CENTRAL, config)
     hdr_preset = json.loads((CENTRAL/config['cor']['preset_hdr_sdr']).read_text(encoding='utf-8'))
     options = settings()
     with LiveProgress('Conferindo alterações dos arquivos', inline=True):
@@ -312,12 +315,13 @@ def main():
     parser.add_argument('--verificar', action='store_true')
     args = parser.parse_args()
     began = time.monotonic()
-    central_logs = CENTRAL/'relatorios'
-    central_logs.mkdir(exist_ok=True)
+    central_logs = logs_folder(CENTRAL)
+    central_logs.mkdir(parents=True, exist_ok=True)
     results = []
     say('agente de pré-edição por Daniel Fileto')
     try:
         jobs = list(discover(args.clientes.resolve()))
+        jobs = [(work_edition(edition, args.clientes), videos) for edition, videos in jobs]
         if args.verificar:
             preflight()
             summary('Verificação local concluída', [f'Edições encontradas: {len(jobs)}',

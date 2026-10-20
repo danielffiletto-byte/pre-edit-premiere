@@ -2,6 +2,7 @@
 import hashlib
 from fractions import Fraction
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -101,8 +102,18 @@ def prepare(source, metadata, preset, run, probe, file_hash):
         return source
     original = Path(source['path'])
     destination = original.with_name(f'sdr {original.stem}.mp4')
+    if os.environ.get('PREEDITOR_METADATA_ROOT'):
+        media = metadata/'Midia'
+        media.mkdir(exist_ok=True)
+        destination = media/f'sdr {original.stem}-{source["sha256"][:8]}.mp4'
     key = fingerprint({'source': source['sha256'], 'path': str(original), 'preset': preset})
     cache = metadata/f'hdr-sdr-{key[:20]}.json'
+    legacy_sdr = original.with_name(f'sdr {original.stem}.mp4')
+    if os.environ.get('PREEDITOR_METADATA_ROOT') and not destination.exists() and legacy_sdr.is_file():
+        # Migração para Metadados: aproveitar a cópia anterior, nunca recodificá-la.
+        with pending_files([destination, cache, cache.with_suffix('.json.tmp')]):
+            shutil.copy2(legacy_sdr, destination)
+            return reuse_existing(source, destination, metadata, cache, key, run, probe, file_hash)
     if destination.exists():
         return reuse_existing(source, destination, metadata, cache, key, run, probe, file_hash)
     else:

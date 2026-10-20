@@ -11,8 +11,9 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT.parent))
 from controle_execucao import read_control
 from console_pipeline import say
+from ambiente_online import logs_folder
 
-CLIENTS = Path(os.environ.get('PREEDITOR_CLIENTES', str(ROOT.parents[2])))
+CLIENTS = Path(os.environ.get('PREEDITOR_WORKSPACE_ROOT') or os.environ.get('PREEDITOR_CLIENTES', str(ROOT.parents[2])))
 
 
 def cleanup(state, pid, clients=CLIENTS):
@@ -80,8 +81,8 @@ def main():
     if os.name != 'nt':
         return subprocess.call([sys.executable, '-u', str(ROOT/'pipeline.py'), *sys.argv[1:]])
     import msvcrt
-    logs = ROOT.parents[1]/'relatorios'
-    logs.mkdir(exist_ok=True)
+    logs = logs_folder(ROOT.parents[1])
+    logs.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='controle-', dir=logs) as folder:
         path = Path(folder)/'controle.json'
         path.write_text(json.dumps({'phase': 'selecting', 'pending': []}), encoding='utf-8')
