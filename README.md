@@ -17,6 +17,8 @@ Use **Pre Editor Online.bat** (ou o arquivo de entrega **Pre Editor Premiere.bat
 
 Após aprovação, configure na janela local um token GitHub somente-leitura deste repositório e a chave Gemini. Ambos ficam protegidos pelo Windows/DPAPI, fora do Git. O BAT confere autorização e versão na internet em cada execução; sem acesso ou sem autorização não usa código antigo. Instruções: [`online/LEIA-ME.md`](online/LEIA-ME.md).
 
+O token salvo é usado automaticamente; o lançador só pede substituição após rejeição de autenticação pelo GitHub. Colagem com controles invisíveis é recusada antes do HTTP; espaços/quebras nas bordas são limpos. Para receber esta correção do próprio lançador, substitua apenas o BAT na mesma pasta, preservando Edição e o ambiente já instalado.
+
 Código, prompt e configurações do motor são executados temporariamente e removidos no encerramento normal. Runtime e modelo de transcrição são baixados uma vez e guardados em Metadados; projetos, áudios tratados, recursos de referência e caches também ficam lá. Os vídeos originais permanecem em Clientes. Fechamento forçado/desligamento pode deixar temporários; isso não é proteção impossível de burlar.
 
 ## Ambiente e credenciais

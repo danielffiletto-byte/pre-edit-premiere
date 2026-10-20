@@ -66,19 +66,57 @@ function Save-SecureSecret([string]$Path, [Security.SecureString]$Secure) {
     } finally { if ($bytes) { [Array]::Clear($bytes,0,$bytes.Length) }; [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($pointer) }
 }
 
+function Normalize-Credential([string]$Value, [string]$Name) {
+    if ($Name -notin @('github','gemini')) { return $Value }
+    $clean = $Value.Trim()
+    if (-not $clean -or $clean -cnotmatch '^[\x21-\x7e]+$') {
+        throw 'Credencial com espacos internos ou caracteres invisiveis. Cole somente a chave completa em uma linha.'
+    }
+    if ($Name -eq 'github' -and $clean -cnotmatch '^(github_pat_[A-Za-z0-9_]+|gh[pousr]_[A-Za-z0-9]+)$') {
+        throw 'Cole somente o token GitHub completo, sem aspas, rotulos ou a palavra Bearer.'
+    }
+    return $clean
+}
+
+function Save-PlainSecret([string]$Path, [string]$Value) {
+    $secure = New-Object Security.SecureString
+    try {
+        foreach ($character in $Value.ToCharArray()) { $secure.AppendChar($character) }
+        Save-SecureSecret $Path $secure
+    } finally { $secure.Dispose() }
+}
+
 function Read-Secret([string]$Folder, [string]$Name, [string]$Label, [bool]$Replace = $false) {
     $path = Get-SafeChild $Folder ($Name+'.protegido')
-    if ($Replace -or -not (Test-Path -LiteralPath $path)) {
-        $secure = Read-Host $Label -AsSecureString
-        if ($secure.Length -eq 0) { throw 'Credencial nao informada.' }
-        try { Save-SecureSecret $path $secure } finally { $secure.Dispose() }
+    if (-not $Replace -and (Test-Path -LiteralPath $path)) {
+        $plain = $null
+        try {
+            $plain = [Security.Cryptography.ProtectedData]::Unprotect([IO.File]::ReadAllBytes($path),$null,[Security.Cryptography.DataProtectionScope]::CurrentUser)
+            $saved = [Text.Encoding]::UTF8.GetString($plain)
+        } catch { throw 'Credencial pertence a outro Windows/usuario ou esta danificada. Execute com --configurar.' }
+        finally { if ($plain) { [Array]::Clear($plain,0,$plain.Length) } }
+        try { $clean = Normalize-Credential $saved $Name }
+        catch { $clean = $null; Write-Host 'A credencial salva tem caracteres invalidos. Informe novamente.' -ForegroundColor Yellow }
+        if ($clean) {
+            # Migra caches antigos com quebra de linha nas bordas, mantendo DPAPI.
+            if ($clean -cne $saved) { Save-PlainSecret $path $clean }
+            return $clean
+        }
     }
-    $plain = $null
-    try {
-        $plain = [Security.Cryptography.ProtectedData]::Unprotect([IO.File]::ReadAllBytes($path),$null,[Security.Cryptography.DataProtectionScope]::CurrentUser)
-        return [Text.Encoding]::UTF8.GetString($plain)
-    } catch { throw 'Credencial pertence a outro Windows/usuario ou esta danificada. Execute com --configurar.' }
-    finally { if ($plain) { [Array]::Clear($plain,0,$plain.Length) } }
+    for ($attempt = 0; $attempt -lt 3; $attempt++) {
+        Write-Host 'Cole com clique direito ou Shift+Insert e pressione ENTER. O texto fica oculto.'
+        $secure = Read-Host $Label -AsSecureString
+        if ($secure.Length -eq 0) { $secure.Dispose(); throw 'Credencial nao informada; configuracao cancelada.' }
+        $pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+        try {
+            try { $clean = Normalize-Credential ([Runtime.InteropServices.Marshal]::PtrToStringBSTR($pointer)) $Name }
+            catch { Write-Host $_.Exception.Message -ForegroundColor Yellow; continue }
+        } finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($pointer); $secure.Dispose() }
+        # Nao substituir o cache por uma colagem incompleta/invalida.
+        Save-PlainSecret $path $clean
+        return $clean
+    }
+    throw 'Nao foi possivel ler a credencial. Copie somente a chave e execute novamente.'
 }
 
 function Assert-RemoteUri([Uri]$Uri, [bool]$Microsoft = $false) {
@@ -105,7 +143,10 @@ function Get-RemoteFile([string]$Url, [string]$Output, [string]$Token, [long]$Li
         catch [Net.WebException] {
             $status = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 0 }
             if ($_.Exception.Response) { $_.Exception.Response.Close() }
-            throw "GitHub/download indisponivel (HTTP $status). Confira internet, token e acesso; nenhuma versao antiga sera executada."
+            $errorObject = New-Object InvalidOperationException "GitHub/download indisponivel (HTTP $status). Confira internet, token e acesso; nenhuma versao antiga sera executada."
+            $errorObject.Data['PreEditorHttpStatus'] = $status
+            $errorObject.Data['PreEditorAuthenticationRejected'] = ($status -eq 401 -and $redirect -eq 0 -and $uri.Host -eq 'api.github.com')
+            throw $errorObject
         }
         try {
             if ([int]$response.StatusCode -in @(301,302,303,307,308)) {
@@ -141,6 +182,25 @@ function Get-RemoteJson([string]$Url, [string]$Token, [string]$Session) {
     $path = Join-Path $Session (([Guid]::NewGuid().ToString('N'))+'.json')
     Get-RemoteFile $Url $path $Token 2097152
     return [IO.File]::ReadAllText($path,[Text.Encoding]::UTF8) | ConvertFrom-Json
+}
+
+function Get-GitHubAccess([string]$Access, [string]$Session, [bool]$Replace = $false) {
+    $external = [bool]$env:PREEDITOR_GITHUB_TOKEN
+    for ($attempt = 0; $attempt -lt 2; $attempt++) {
+        $token = if ($external) { Normalize-Credential $env:PREEDITOR_GITHUB_TOKEN 'github' } else {
+            Read-Secret $Access 'github' 'Token GitHub de leitura (oculto)' ($Replace -or $attempt -gt 0)
+        }
+        try {
+            $commit = Get-RemoteJson ($script:Api+'/commits/main') $token $Session
+            return @{Token=$token;Commit=$commit}
+        } catch {
+            if (-not $external -and $attempt -eq 0 -and $_.Exception.Data['PreEditorAuthenticationRejected'] -eq $true) {
+                Write-Host 'GitHub recusou o token: pode estar expirado, revogado ou incorreto. Informe o novo token; sera salvo criptografado.' -ForegroundColor Yellow
+                continue
+            }
+            throw
+        }
+    }
 }
 
 function Get-RepositoryJson([string]$Path, [string]$Ref, [string]$Token, [string]$Session) {
@@ -273,9 +333,10 @@ function Invoke-PreEditor {
         $session = Join-Path $tempBase ('preedit-'+[Guid]::NewGuid().ToString('N'))
         [IO.Directory]::CreateDirectory($session) | Out-Null
         $replace = $env:PREEDITOR_MODE -eq '--configurar'
-        $token = if ($env:PREEDITOR_GITHUB_TOKEN) { $env:PREEDITOR_GITHUB_TOKEN } else { Read-Secret $access 'github' 'Token GitHub de leitura (oculto)' $replace }
         Write-Host '[1/4] Conferindo acesso e versao atual...' -ForegroundColor Yellow
-        $commit = Get-RemoteJson ($script:Api+'/commits/main') $token $session
+        $authentication = Get-GitHubAccess $access $session $replace
+        $token = $authentication.Token; $commit = $authentication.Commit
+        $authentication = $null
         if ($commit.sha -notmatch '^[a-f0-9]{40}$') { throw 'Versao GitHub invalida.' }
         Assert-Device (Get-RepositoryJson 'acesso/computadores.json' $commit.sha $token $session) $hash
         $release = Get-RepositoryJson 'online/versao.json' $commit.sha $token $session
@@ -315,7 +376,7 @@ function Invoke-PreEditor {
         $env:PYTHONHOME = $null; $env:PYTHONPATH = $null
         $env:PATH = (Join-Path $runtime 'ffmpeg\bin')+';'+$env:PATH
         $env:PIPELINE_COLOR = '1'
-        $env:GEMINI_API_KEY = if ($env:GEMINI_API_KEY) { $env:GEMINI_API_KEY } else { Read-Secret $access 'gemini' 'Chave Gemini (oculta; guardada criptografada neste Windows)' $replace }
+        $env:GEMINI_API_KEY = if ($env:GEMINI_API_KEY) { Normalize-Credential $env:GEMINI_API_KEY 'gemini' } else { Read-Secret $access 'gemini' 'Chave Gemini (oculta; guardada criptografada neste Windows)' $replace }
         $entry = Join-Path $source 'online\executar_online.py'
         $arguments = @('-s','-B','-u',$entry,'--metadata',$metadata,'--clients',$clients)
         $prepare = $arguments+@('--preparar')

@@ -16,6 +16,9 @@
 - O hash de cadastro identifica Windows + usuário. Trocar usuário/reinstalar Windows pode exigir nova autorização. Remova/desabilite o hash para bloquear próximas execuções. Isso não impede cópia técnica do código ou dos projetos já entregues.
 - `Pre Editor Premiere.bat --cadastro`: mostrar hash. `--configurar`: digitar credenciais novamente. `--verificar`: verificar ambiente e pastas sem editar nem consumir API.
 - O GitHub conectado ao chat não autentica este BAT. Não enviar senha, token ou chave pelo chat; inserir somente na janela local.
+- Token salvo é reutilizado automaticamente. Espaços/quebras de linha nas bordas são removidos; controles internos/colagem incompleta são recusados antes do HTTP. Cole a chave inteira usando clique direito ou Shift+Insert; não digite rótulos nem aspas.
+- Se o GitHub recusar autenticação (401: token expirado/revogado/incorreto), pede novo token uma vez e o guarda novamente com DPAPI. Falha de internet, permissão insuficiente ou computador não autorizado não pede outra chave nem libera execução.
+- Correção da leitura/renovação do token faz parte do lançador local: substituir apenas o BAT antigo por esta versão, na mesma pasta. Não apagar Edição/Metadados nem reinstalar o ambiente. Atualizações normais do motor continuam automáticas pelo GitHub.
 
 ## Administração
 
