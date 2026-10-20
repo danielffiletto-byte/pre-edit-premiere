@@ -1,4 +1,4 @@
-# Bootstrap operacional. Heurísticas e motor são baixados do repositório autorizado.
+# Bootstrap operacional. Motor e heurísticas vêm do repositório público, sem login.
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -48,14 +48,6 @@ function Write-JsonFile([string]$Path, $Value) {
     Move-Item -LiteralPath $temp -Destination $Path -Force
 }
 
-function Get-ComputerFingerprint {
-    $registry = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine,[Microsoft.Win32.RegistryView]::Registry64)
-    try { $key = $registry.OpenSubKey('SOFTWARE\Microsoft\Cryptography'); try { $machine = $key.GetValue('MachineGuid') } finally { if ($key) { $key.Dispose() } } } finally { $registry.Dispose() }
-    $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-    if (-not $machine -or -not $sid) { throw 'Nao foi possivel identificar este Windows/usuario.' }
-    return Get-TextDigest ('preedit-computador-v1|'+$machine+'|'+$sid)
-}
-
 function Save-SecureSecret([string]$Path, [Security.SecureString]$Secure) {
     $pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Secure)
     $bytes = $null
@@ -67,13 +59,10 @@ function Save-SecureSecret([string]$Path, [Security.SecureString]$Secure) {
 }
 
 function Normalize-Credential([string]$Value, [string]$Name) {
-    if ($Name -notin @('github','gemini')) { return $Value }
+    if ($Name -ne 'gemini') { return $Value }
     $clean = $Value.Trim()
     if (-not $clean -or $clean -cnotmatch '^[\x21-\x7e]+$') {
         throw 'Credencial com espacos internos ou caracteres invisiveis. Cole somente a chave completa em uma linha.'
-    }
-    if ($Name -eq 'github' -and $clean -cnotmatch '^(github_pat_[A-Za-z0-9_]+|gh[pousr]_[A-Za-z0-9]+)$') {
-        throw 'Cole somente o token GitHub completo, sem aspas, rotulos ou a palavra Bearer.'
     }
     return $clean
 }
@@ -125,7 +114,7 @@ function Assert-RemoteUri([Uri]$Uri, [bool]$Microsoft = $false) {
     if (-not @($domains | Where-Object { $Uri.DnsSafeHost -eq $_ -or $Uri.DnsSafeHost.EndsWith('.'+$_,[StringComparison]::OrdinalIgnoreCase) }).Count) { throw 'Destino de download nao reconhecido.' }
 }
 
-function Get-RemoteFile([string]$Url, [string]$Output, [string]$Token, [long]$Limit = 20971520, [string]$Accept = 'application/vnd.github+json', [bool]$Microsoft = $false) {
+function Get-RemoteFile([string]$Url, [string]$Output, [long]$Limit = 20971520, [string]$Accept = 'application/vnd.github+json', [bool]$Microsoft = $false) {
     $uri = [Uri]$Url
     for ($redirect = 0; $redirect -lt 7; $redirect++) {
         Assert-RemoteUri $uri $Microsoft
@@ -134,18 +123,17 @@ function Get-RemoteFile([string]$Url, [string]$Output, [string]$Token, [long]$Li
         $request.Timeout = 45000; $request.ReadWriteTimeout = 90000
         $request.UserAgent = 'PreEdit-DanielFileto/1.0'
         $request.Accept = $Accept
-        # Segredo nunca acompanha redirecionamento/CDN.
-        if ($redirect -eq 0 -and $uri.Host -eq 'api.github.com' -and $Token) {
-            $request.Headers['Authorization'] = 'Bearer '+$Token
+        # Downloads sempre anonimos; nenhuma credencial acompanha API ou CDN.
+        if ($uri.Host -eq 'api.github.com') {
             $request.Headers['X-GitHub-Api-Version'] = '2022-11-28'
         }
         try { $response = $request.GetResponse() }
         catch [Net.WebException] {
             $status = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 0 }
             if ($_.Exception.Response) { $_.Exception.Response.Close() }
-            $errorObject = New-Object InvalidOperationException "GitHub/download indisponivel (HTTP $status). Confira internet, token e acesso; nenhuma versao antiga sera executada."
+            $detail = if ($status -in @(403,429)) { 'Limite temporario ou bloqueio do GitHub; tente mais tarde.' } else { 'Confira internet e se o repositorio continua publico.' }
+            $errorObject = New-Object InvalidOperationException "GitHub/download indisponivel (HTTP $status). $detail Nenhuma versao antiga sera executada."
             $errorObject.Data['PreEditorHttpStatus'] = $status
-            $errorObject.Data['PreEditorAuthenticationRejected'] = ($status -eq 401 -and $redirect -eq 0 -and $uri.Host -eq 'api.github.com')
             throw $errorObject
         }
         try {
@@ -178,41 +166,10 @@ function Get-RemoteFile([string]$Url, [string]$Output, [string]$Token, [long]$Li
     throw 'Redirecionamentos demais; download recusado.'
 }
 
-function Get-RemoteJson([string]$Url, [string]$Token, [string]$Session) {
+function Get-RemoteJson([string]$Url, [string]$Session) {
     $path = Join-Path $Session (([Guid]::NewGuid().ToString('N'))+'.json')
-    Get-RemoteFile $Url $path $Token 2097152
+    Get-RemoteFile $Url $path 2097152
     return [IO.File]::ReadAllText($path,[Text.Encoding]::UTF8) | ConvertFrom-Json
-}
-
-function Get-GitHubAccess([string]$Access, [string]$Session, [bool]$Replace = $false) {
-    $external = [bool]$env:PREEDITOR_GITHUB_TOKEN
-    for ($attempt = 0; $attempt -lt 2; $attempt++) {
-        $token = if ($external) { Normalize-Credential $env:PREEDITOR_GITHUB_TOKEN 'github' } else {
-            Read-Secret $Access 'github' 'Token GitHub de leitura (oculto)' ($Replace -or $attempt -gt 0)
-        }
-        try {
-            $commit = Get-RemoteJson ($script:Api+'/commits/main') $token $Session
-            return @{Token=$token;Commit=$commit}
-        } catch {
-            if (-not $external -and $attempt -eq 0 -and $_.Exception.Data['PreEditorAuthenticationRejected'] -eq $true) {
-                Write-Host 'GitHub recusou o token: pode estar expirado, revogado ou incorreto. Informe o novo token; sera salvo criptografado.' -ForegroundColor Yellow
-                continue
-            }
-            throw
-        }
-    }
-}
-
-function Get-RepositoryJson([string]$Path, [string]$Ref, [string]$Token, [string]$Session) {
-    $data = Get-RemoteJson ($script:Api+'/contents/'+$Path+'?ref='+$Ref) $Token $Session
-    if ($data.encoding -ne 'base64' -or $data.type -ne 'file') { throw 'Arquivo de configuracao remoto invalido.' }
-    return [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($data.content)) | ConvertFrom-Json
-}
-
-function Assert-Device($Allowlist, [string]$Hash) {
-    if ($Allowlist.schema -ne 1) { throw 'Lista de computadores incompatível.' }
-    $matches = @($Allowlist.devices | Where-Object { $_.hash -ceq $Hash })
-    if ($matches.Count -ne 1 -or $matches[0].enabled -isnot [bool] -or $matches[0].enabled -ne $true) { throw "Computador ainda nao autorizado. Envie este hash ao Daniel: $Hash" }
 }
 
 function Expand-CheckedZip([string]$Archive, [string]$Destination, [long]$Maximum = 4294967296) {
@@ -296,7 +253,7 @@ function Install-VisualRuntime([string]$Session) {
     $answer = Read-Host 'Instalar Microsoft Visual C++ Runtime? [s/N]'
     if ($answer -notmatch '^(?i:s|sim|yes|y)$') { throw 'Preparacao interrompida; nenhuma protecao do Windows foi alterada.' }
     $file = Join-Path $Session 'vc_redist.x64.exe'
-    Get-RemoteFile 'https://aka.ms/vs/17/release/vc_redist.x64.exe' $file '' 104857600 'application/octet-stream' $true
+    Get-RemoteFile 'https://aka.ms/vs/17/release/vc_redist.x64.exe' $file 104857600 'application/octet-stream' $true
     Import-Module (Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1') -ErrorAction Stop
     $signature = Get-AuthenticodeSignature -LiteralPath $file
     if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'Microsoft Corporation') { throw 'Assinatura Microsoft nao confirmada.' }
@@ -306,7 +263,7 @@ function Install-VisualRuntime([string]$Session) {
 }
 
 function Invoke-PreEditor {
-    $exitCode = 1; $session = $null; $lock = $null; $token = $null
+    $exitCode = 1; $session = $null; $lock = $null
     try {
         $nativeArch = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
         if ($env:OS -ne 'Windows_NT' -or [Environment]::Is64BitOperatingSystem -ne $true -or $nativeArch -ne 'AMD64') { throw 'Use Windows 10/11 x64 (nao ARM ou Mac).' }
@@ -320,48 +277,37 @@ function Invoke-PreEditor {
         $access = Join-Path $metadata 'Acesso'
         $tempBase = Join-Path $metadata 'Temporarios'
         $lock = [IO.File]::Open((Join-Path $metadata 'execucao.lock'),[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
-        $hash = Get-ComputerFingerprint
-        $register = Join-Path $access 'COMPUTADOR.md'
-        $first = -not (Test-Path -LiteralPath $register)
-        [IO.File]::WriteAllText($register, "# Cadastro do computador`n`nHash: ``$hash```n`nEnvie somente este hash ao Daniel para autorizar. Nao envie chaves ou senhas.`n", [Text.Encoding]::UTF8)
         Write-Host 'Pre Editor Premiere | Daniel Fileto' -ForegroundColor Cyan
-        if ($env:PREEDITOR_MODE -eq '--cadastro' -or ($first -and -not $env:PREEDITOR_GITHUB_TOKEN)) {
-            Write-Host "`nHASH DO COMPUTADOR:`n$hash" -ForegroundColor Yellow
-            Write-Host "`nCadastro criado em Edição\Metadados\Acesso\COMPUTADOR.md. Envie o hash ao Daniel e execute novamente apos autorizar."
-            $exitCode = 3; return
+        if ($env:PREEDITOR_MODE -eq '--cadastro') {
+            Write-Host 'Nao e mais necessario cadastrar computador nem informar token GitHub.'
+            $exitCode = 0; return
         }
         $session = Join-Path $tempBase ('preedit-'+[Guid]::NewGuid().ToString('N'))
         [IO.Directory]::CreateDirectory($session) | Out-Null
         $replace = $env:PREEDITOR_MODE -eq '--configurar'
-        Write-Host '[1/4] Conferindo acesso e versao atual...' -ForegroundColor Yellow
-        $authentication = Get-GitHubAccess $access $session $replace
-        $token = $authentication.Token; $commit = $authentication.Commit
-        $authentication = $null
+        Write-Host '[1/4] Buscando versao atual — sem login...' -ForegroundColor Yellow
+        $commit = Get-RemoteJson ($script:Api+'/commits/main') $session
         if ($commit.sha -notmatch '^[a-f0-9]{40}$') { throw 'Versao GitHub invalida.' }
-        Assert-Device (Get-RepositoryJson 'acesso/computadores.json' $commit.sha $token $session) $hash
-        $release = Get-RepositoryJson 'online/versao.json' $commit.sha $token $session
-        if ($release.schema -ne 1 -or $release.editor -ne 'premiere' -or $release.bootstrap_version -gt 1) { throw 'Versao de motor incompatível; baixe o BAT atualizado.' }
         $codeZip = Join-Path $session 'motor.zip'
-        Get-RemoteFile ($script:Api+'/zipball/'+$commit.sha) $codeZip $token 20971520 'application/vnd.github+json'
+        Get-RemoteFile ($script:Api+'/zipball/'+$commit.sha) $codeZip 20971520 'application/vnd.github+json'
         $sourceBase = Join-Path $session 'fonte'
         Expand-CheckedZip $codeZip $sourceBase 104857600
         $roots = @(Get-ChildItem -LiteralPath $sourceBase -Directory)
         if ($roots.Count -ne 1) { throw 'Estrutura do pacote remoto invalida.' }
         $source = $roots[0].FullName
         # Os hashes vêm da árvore Git do commit: editar prompt/código no GitHub não exige atualizar uma lista manual.
-        Assert-GitTree $source (Get-RemoteJson ($script:Api+'/git/trees/'+$commit.sha+'?recursive=1') $token $session)
+        Assert-GitTree $source (Get-RemoteJson ($script:Api+'/git/trees/'+$commit.sha+'?recursive=1') $session)
+        $release = [IO.File]::ReadAllText((Join-Path $source 'online\versao.json'),[Text.Encoding]::UTF8) | ConvertFrom-Json
+        if ($release.schema -ne 1 -or $release.editor -ne 'premiere' -or $release.bootstrap_version -gt 1) { throw 'Versao de motor incompatível; baixe o BAT atualizado.' }
         $runtimeSpec = [IO.File]::ReadAllText((Join-Path $source 'online\runtime.json'),[Text.Encoding]::UTF8) | ConvertFrom-Json
         if ($runtimeSpec.version -notmatch '^windows-x64-v[0-9]+$' -or $runtimeSpec.tag -cne $runtimeSpec.version -or $runtimeSpec.asset -notmatch '^preedit-runtime-windows-x64-v[0-9]+\.zip$' -or $runtimeSpec.sha256 -notmatch '^[a-f0-9]{64}$' -or $runtimeSpec.size -le 0 -or $runtimeSpec.size -gt 1GB) { throw 'Descritor de ambiente invalido.' }
         $runtime = Get-SafeChild (Join-Path $metadata 'Runtime') $runtimeSpec.version
         Write-Host '[2/4] Preparando Python, bibliotecas e FFmpeg...' -ForegroundColor Yellow
         if (-not (Test-Path -LiteralPath $runtime)) {
             if ((New-Object IO.DriveInfo ([IO.Path]::GetPathRoot($metadata))).AvailableFreeSpace -lt 5GB) { throw 'Reserve pelo menos 5 GB livres para instalar.' }
-            $assets = Get-RemoteJson ($script:Api+'/releases/tags/'+$runtimeSpec.tag) $token $session
-            $asset = @($assets.assets | Where-Object { $_.name -ceq $runtimeSpec.asset })
-            if ($asset.Count -ne 1 -or $asset[0].size -ne $runtimeSpec.size) { throw 'Ambiente ainda nao publicado ou tamanho divergente.' }
             $runtimeZip = Join-Path $session 'runtime.zip'
-            Get-RemoteFile ($script:Api+'/releases/assets/'+$asset[0].id) $runtimeZip $token 1073741824 'application/octet-stream'
-            if ((Get-Digest $runtimeZip) -cne $runtimeSpec.sha256) { throw 'Hash do ambiente divergente; nada sera executado.' }
+            Get-RemoteFile ('https://github.com/'+$script:Repo+'/releases/download/'+$runtimeSpec.tag+'/'+$runtimeSpec.asset) $runtimeZip 1073741824 'application/octet-stream'
+            if ((Get-Item -LiteralPath $runtimeZip).Length -ne $runtimeSpec.size -or (Get-Digest $runtimeZip) -cne $runtimeSpec.sha256) { throw 'Tamanho/hash do ambiente divergente; nada sera executado.' }
             $runtimeStage = Join-Path $session 'runtime'
             Expand-CheckedZip $runtimeZip $runtimeStage
             Assert-FileManifest $runtimeStage $runtimeSpec.files
@@ -390,9 +336,6 @@ function Invoke-PreEditor {
             $answer = Read-Host 'Conversao HDR indisponivel. Continuar somente com videos SDR? [s/N]'
             if ($answer -notmatch '^(?i:s|sim|yes|y)$') { throw 'Execucao cancelada ate corrigir o driver HDR.' }
         }
-        # Nova consulta online apos os downloads longos; sem cache de autorizacao.
-        Assert-Device (Get-RepositoryJson 'acesso/computadores.json' 'main' $token $session) $hash
-        $token = $null
         if ($env:PREEDITOR_MODE -eq '--verificar') { $arguments += '--verificar' }
         Write-Host '[4/4] Iniciando pre-edicao...' -ForegroundColor Yellow
         & $python @arguments
@@ -402,7 +345,7 @@ function Invoke-PreEditor {
         Write-Host ('ERRO: '+$_.Exception.Message) -ForegroundColor Red
         $exitCode = 1
     } finally {
-        $env:GEMINI_API_KEY = $null; $token = $null
+        $env:GEMINI_API_KEY = $null
         if ($session) {
             try { Remove-OwnSession $session $tempBase; Write-Host 'Codigo temporario removido; clientes, projetos e caches preservados.' }
             catch { Write-Host 'Nao foi possivel concluir a limpeza temporaria. Feche os processos e confira Metadados\Temporarios.' -ForegroundColor Yellow; if ($exitCode -eq 0) { $exitCode = 1 } }
