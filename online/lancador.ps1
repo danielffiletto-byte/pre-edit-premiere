@@ -118,23 +118,28 @@ function Get-RemoteFile([string]$Url, [string]$Output, [long]$Limit = 20971520, 
     $uri = [Uri]$Url
     for ($redirect = 0; $redirect -lt 7; $redirect++) {
         Assert-RemoteUri $uri $Microsoft
-        $request = [Net.HttpWebRequest]::Create($uri)
-        $request.Method = 'GET'; $request.AllowAutoRedirect = $false
-        $request.Timeout = 45000; $request.ReadWriteTimeout = 90000
-        $request.UserAgent = 'PreEdit-DanielFileto/1.0'
-        $request.Accept = $Accept
-        # Downloads sempre anonimos; nenhuma credencial acompanha API ou CDN.
-        if ($uri.Host -eq 'api.github.com') {
-            $request.Headers['X-GitHub-Api-Version'] = '2022-11-28'
-        }
-        try { $response = $request.GetResponse() }
-        catch [Net.WebException] {
-            $status = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 0 }
-            if ($_.Exception.Response) { $_.Exception.Response.Close() }
-            $detail = if ($status -in @(403,429)) { 'Limite temporario ou bloqueio do GitHub; tente mais tarde.' } else { 'Confira internet e se o repositorio continua publico.' }
-            $errorObject = New-Object InvalidOperationException "GitHub/download indisponivel (HTTP $status). $detail Nenhuma versao antiga sera executada."
-            $errorObject.Data['PreEditorHttpStatus'] = $status
-            throw $errorObject
+        for ($attempt = 0; $attempt -lt 3; $attempt++) {
+            $request = [Net.HttpWebRequest]::Create($uri)
+            $request.Method = 'GET'; $request.AllowAutoRedirect = $false
+            $request.Timeout = 45000; $request.ReadWriteTimeout = 90000
+            $request.UserAgent = 'PreEdit-DanielFileto/1.0'
+            $request.Accept = $Accept
+            # Downloads sempre anonimos; nenhuma credencial acompanha API ou CDN.
+            if ($uri.Host -eq 'api.github.com') { $request.Headers['X-GitHub-Api-Version'] = '2022-11-28' }
+            try { $response = $request.GetResponse(); break }
+            catch [Net.WebException] {
+                $status = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 0 }
+                if ($_.Exception.Response) { $_.Exception.Response.Close() }
+                if ($status -in @(500,502,503,504) -and $attempt -lt 2) {
+                    Write-Host ('Download temporariamente indisponivel. Tentando novamente ('+($attempt+2)+'/3)...') -ForegroundColor Yellow
+                    Start-Sleep -Seconds (2*($attempt+1))
+                    continue
+                }
+                $detail = if ($status -in @(403,429)) { 'Limite temporario ou bloqueio do GitHub; tente mais tarde.' } else { 'Confira internet e se o repositorio continua publico.' }
+                $errorObject = New-Object InvalidOperationException "GitHub/download indisponivel (HTTP $status). $detail Nenhuma versao antiga sera executada."
+                $errorObject.Data['PreEditorHttpStatus'] = $status
+                throw $errorObject
+            }
         }
         try {
             if ([int]$response.StatusCode -in @(301,302,303,307,308)) {
