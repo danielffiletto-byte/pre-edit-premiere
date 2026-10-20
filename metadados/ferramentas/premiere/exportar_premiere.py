@@ -9,6 +9,7 @@ import argparse
 from datetime import datetime
 from fractions import Fraction
 import io
+import hashlib
 import json
 import math
 import os
@@ -39,6 +40,21 @@ CONFIG = {'schema': 2, 'silence_threshold_dbfs': -25.0,
 DETECTION_KEYS = ('silence_threshold_dbfs', 'pause_seconds', 'normalize_peak_dbfs', 'speed')
 EXTENSIONS = {'.mp4', '.mov'}
 SECTION = '## Pré-edição Premiere'
+
+
+class VideoTimingError(ValueError):
+    """Tempos de apresentação inválidos; nunca ignorar para montar os cortes."""
+
+
+def presentation_signature(pts, time_base):
+    """Resumo exato dos intervalos, independente da unidade usada no contêiner."""
+    base = Fraction(time_base)
+    digest = hashlib.sha256()
+    first = pts[0]
+    for value in pts:
+        offset = (value-first)*base
+        digest.update(f'{offset.numerator}/{offset.denominator}\n'.encode('ascii'))
+    return digest.hexdigest()
 
 
 def natural_key(path):
@@ -214,7 +230,7 @@ def probe(path):
     try:
         pts = sorted(int(packet['pts']) for packet in json.loads(result.stdout)['packets'])
     except (KeyError, ValueError):
-        raise ValueError('Pacote de vídeo sem timestamp válido; original preservado.') from None
+        raise VideoTimingError(f'{path.name}: quadro sem marcação de tempo válida; original preservado.') from None
     timing = media_timing(pts, v['time_base'], v.get('r_frame_rate'),
                           v.get('avg_frame_rate'), v.get('duration'))
     fps, cadence = Fraction(timing['fps']), timing['cadence']
@@ -226,6 +242,8 @@ def probe(path):
             'pixel_format': v.get('pix_fmt', ''),
             'fps': str(fps), 'frames': frames, 'duration': duration,
             'media_fps': timing['media_fps'], 'decoded_frames': len(pts),
+            'video_time_base': str(Fraction(v['time_base'])),
+            'presentation_sha256': presentation_signature(pts, v['time_base']),
             'width': v['width'], 'height': v['height'], 'channels': a['channels'],
             'rotation_degrees': rotation,
             'sample_rate': int(a['sample_rate']),
@@ -242,11 +260,11 @@ def media_timing(pts, time_base, nominal_rate, average_rate, duration):
     Não usa Interpret Footage/Assume Frame Rate nem muda velocidade.
     """
     if not pts or any(b <= a for a, b in zip(pts, pts[1:])):
-        raise ValueError('Timestamps de vídeo ausentes ou duplicados; revise a cadência.')
+        raise VideoTimingError('Tempos dos quadros ausentes ou repetidos; não é seguro posicionar os cortes.')
     base = Fraction(time_base)
     actual_duration = Fraction(str(duration))
     if base <= 0 or actual_duration <= 0 or (pts[-1]-pts[0])*base >= actual_duration:
-        raise ValueError('Duração real/PTS inconsistentes; original preservado.')
+        raise VideoTimingError('Duração e tempos dos quadros inconsistentes; original preservado.')
     rates = []
     for value in (nominal_rate, average_rate):
         try:

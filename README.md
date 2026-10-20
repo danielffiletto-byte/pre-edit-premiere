@@ -9,6 +9,7 @@ Pré-edição de vídeo por Daniel Fileto. Repositório privado de código-fonte
 - Pico-alvo 0 dBFS, com aumento total máximo de +6 dB por trecho.
 - Legendas de até cinco palavras/duas linhas, separadas também pela pontuação.
 - Originais preservados; pré-edição e textos continuam editáveis no programa.
+- Conversão HDR→Rec.709 preserva a precisão temporal do original, sem arredondar os quadros para FPS nominal. Confere os instantes individuais; em falha temporal do encoder GPU, tenta CPU uma vez com a mesma cor e precisão. Se continuar inválido, interrompe sem publicar a cópia. SDR válido já existente continua sendo reaproveitado.
 
 ## Instalar pelo lançador online — Windows
 

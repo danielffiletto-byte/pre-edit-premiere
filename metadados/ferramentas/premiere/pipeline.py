@@ -146,6 +146,11 @@ def _process(edition, videos, config, started, force=False):
                 reused_sdr = sources[i].get('sdr_reused', False)
                 progress.stage(f'{"SDR existente reaproveitado" if reused_sdr else "Conversão SDR concluída"} — arquivo {i+1}/{len(sources)}')
                 record = sources[i]['hdr_conversion']
+                timing_note = ('Instantes dos quadros preservados e conferidos individualmente.'
+                               if record.get('presentation_verified') else
+                               'SDR existente: tempos, contagem e duração conferidos, sem reconversão.')
+                if record.get('timing_recovery'):
+                    timing_note += ' Recuperação automática com encoder CPU; mesmo preset de cor.'
                 preset_note = ('Preset original não comprovado: SDR existente validado, sem alterar a cor.'
                                if record.get('preset_verified') is False else
                                f'Preset registrado: {record["preset"]}.')
@@ -153,6 +158,7 @@ def _process(edition, videos, config, started, force=False):
                        f'- {"SDR existente reaproveitado; nenhuma conversão executada." if reused_sdr else "Nova conversão executada."}\n'
                        f'- {preset_note}\n'
                        f'- Cópia: `{sources[i]["name"]}`; 10 bits, resolução preservada, áudio sem recodificação.\n'
+                       f'- {timing_note}\n'
                        '- Original intacto; cópia SDR verificada/reaproveitável. Sem override Rec.709.',
                        title='Preparação HDR → SDR', section='## Cor')
         if len({s['channels'] for s in sources}) != 1:

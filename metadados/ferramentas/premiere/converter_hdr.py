@@ -8,6 +8,7 @@ import shutil
 import subprocess
 
 from controle_execucao import pending_files, control
+from exportar_premiere import VideoTimingError
 
 
 def fingerprint(value):
@@ -34,7 +35,7 @@ def select_encoder(preset):
     return preset['gpu_encoder'] if result.returncode == 0 else preset['cpu_encoder']
 
 
-def validate_conversion(original, converted):
+def validate_conversion(original, converted, *, exact_timing=False):
     if (converted.get('pixel_format') != 'yuv420p10le'
             or any(converted['color'].get(k) != 'bt709' for k in
                    ('color_space', 'color_transfer', 'color_primaries'))):
@@ -43,11 +44,23 @@ def validate_conversion(original, converted):
             or converted['sample_rate'] != original['sample_rate']
             or converted['decoded_frames'] != original['decoded_frames']
             or abs(converted['duration']-original['duration']) > 1/float(Fraction(original['fps']))):
-        raise ValueError('Conversão alterou contagem/duração ou formato do áudio; revisar.')
+        raise VideoTimingError('Conversão alterou contagem/duração ou formato do áudio; revisar.')
+    if exact_timing and (not original.get('presentation_sha256')
+                         or converted.get('presentation_sha256') != original['presentation_sha256']):
+        raise VideoTimingError('Conversão não preservou os instantes exatos dos quadros.')
     rotated = abs(original.get('rotation_degrees', 0)) % 180 == 90
     size = (original['height'], original['width']) if rotated else (original['width'], original['height'])
     if (converted['width'], converted['height']) != size or converted.get('rotation_degrees', 0) != 0:
         raise ValueError('Conversão alterou resolução/orientação inesperadamente.')
+
+
+def timing_options(source):
+    """Não arredondar VFR para 1/fps: dois PTS válidos poderiam se tornar iguais."""
+    base = Fraction(source['video_time_base'])
+    if base <= 0 or base.denominator > 2147483647:
+        raise VideoTimingError('Precisão temporal fora do limite MP4; original preservado.')
+    return ['-fps_mode', 'passthrough', '-enc_time_base:v', str(base),
+            '-video_track_timescale', str(base.denominator)]
 
 
 def save_record(cache, record):
@@ -117,28 +130,51 @@ def prepare(source, metadata, preset, run, probe, file_hash):
     if destination.exists():
         return reuse_existing(source, destination, metadata, cache, key, run, probe, file_hash)
     else:
-        encoder = select_encoder(preset)
+        precise_timing = timing_options(source)
+        preferred_encoder = select_encoder(preset)
+        encoders = [preferred_encoder]
+        if preferred_encoder != preset['cpu_encoder']:
+            encoders.append(preset['cpu_encoder'])
         temporary = metadata/f'hdr-sdr-{key[:20]}.partial.mp4'
         if temporary.exists():
             raise ValueError(f'Intermediário anterior encontrado: {temporary.name}; revise antes de repetir.')
         with pending_files([temporary, cache, cache.with_suffix('.json.tmp')]):
             with (metadata/'hdr-sdr-debug.log').open('a', encoding='utf-8') as debug:
-                run(['-n', '-init_hw_device', 'vulkan=vk:0', '-filter_hw_device', 'vk',
-                     '-i', str(original), '-map', '0:v:0', '-map', '0:a:0',
-                     '-vf', preset['filter']+',format=p010le', '-fps_mode', 'passthrough',
-                     *encoder, '-tag:v', 'hvc1', '-c:a', 'copy', '-map_metadata', '-1',
-                     '-map_chapters', '-1', '-color_primaries', 'bt709', '-color_trc', 'bt709',
-                     '-colorspace', 'bt709', '-color_range', 'tv', '-movflags', '+faststart',
-                     str(temporary)], 'Convertendo HDR para Rec.709 — cor aprovada', source['duration'], debug)
-                converted = probe(temporary)
-                validate_conversion(source, converted)
+                recovery = None
+                for attempt, encoder in enumerate(encoders):
+                    label = ('Convertendo HDR para Rec.709 — cor aprovada' if attempt == 0 else
+                             'Recuperando precisão dos quadros — segunda tentativa segura')
+                    run(['-n', '-init_hw_device', 'vulkan=vk:0', '-filter_hw_device', 'vk',
+                         '-i', str(original), '-map', '0:v:0', '-map', '0:a:0',
+                         '-vf', preset['filter']+',format=p010le', *precise_timing,
+                         *encoder, '-tag:v', 'hvc1', '-c:a', 'copy', '-map_metadata', '-1',
+                         '-map_chapters', '-1', '-color_primaries', 'bt709', '-color_trc', 'bt709',
+                         '-colorspace', 'bt709', '-color_range', 'tv', '-movflags', '+faststart',
+                         str(temporary)], label, source['duration'], debug)
+                    try:
+                        converted = probe(temporary)
+                        validate_conversion(source, converted, exact_timing=True)
+                        break
+                    except VideoTimingError as error:
+                        if attempt+1 == len(encoders):
+                            raise VideoTimingError(
+                                'Não foi possível preservar os tempos dos quadros na conversão SDR, '
+                                'mesmo com precisão original. Original intacto; nenhuma cópia insegura publicada. '
+                                'Consulte hdr-sdr-debug.log.') from error
+                        recovery = str(error)
+                        debug.write(f'\nRecuperação temporal: {error}; repetindo com encoder CPU e mesmo preset de cor.\n')
+                        debug.flush()
+                        # Só este intermediário novo, criado dentro de pending_files, é descartado.
+                        temporary.unlink()
                 run(['-v', 'error', '-xerror', '-i', str(temporary), '-map', '0:v:0',
                      '-map', '0:a:0', '-f', 'null', '-'], 'Conferindo conversão SDR', source['duration'], debug)
             if file_hash(original) != source['sha256']:
                 raise ValueError('O original mudou durante a conversão.')
             record = {'key': key, 'preset': preset['preset'], 'preset_verified': True, 'original_source': source,
                       'output': str(destination), 'output_sha256': file_hash(temporary),
-                      'encoder': encoder, 'full_decode': 'OK'}
+                      'encoder': encoder, 'full_decode': 'OK',
+                      'timing_policy': 'source-time-base-v1',
+                      'presentation_verified': True, 'timing_recovery': recovery}
             # ESC aguarda a publicação curta. O MP4 parcial fica apenas nos metadados.
             control(phase='publishing')
             temporary.rename(destination)  # No Windows, nunca substitui destino existente.
